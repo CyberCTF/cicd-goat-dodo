@@ -1,0 +1,98 @@
+# yaml-language-server: $schema=https://www.isoloom.com/schema/v1.json
+# Dodo (CI/CD Goat, CICD-SEC-1 Insufficient Flow Control): a live, two-machine CI/CD lab.
+# A Jenkins controller runs a FIXED pipeline for Wonderland's dodo repository (Terraform IaC),
+# hosted on a Gitea server. The pipeline runs a security scanner (Checkov) as a DEPLOY GATE: it
+# refuses to deploy an S3 bucket that is publicly readable. The scanner, however, reads its own
+# configuration from the repository (`.checkov.yaml`) — so an attacker with write access can make
+# the bucket public AND drop a `.checkov.yaml` that neuters the scan (soft-fail + a bogus check).
+# The gate then passes, the gated deploy step runs the attacker's change, and the flag — a
+# Global-scope Jenkins credential the deploy step binds only when a public bucket is actually
+# deployed — lands in the build console in a form the masker will not catch. This is a scan/gate
+# bypass via insufficient flow control. See https://www.isoloom.com.
+version: 1
+name: cicd-goat-dodo
+
+networks:
+  lab: { cidr: 10.40.0.0/24 }
+
+# The per-player flag, issued by CyberCTF and handed to the lab by the launcher as a FILE (never an
+# environment value, so it never shows in `docker inspect`, an image layer or a generated file). The
+# Jenkins entrypoint stages it into the directory JCasC reads file secrets from, so the `flag`
+# credential resolves at boot. Optional: an offline start (local, CI) leaves it empty and the lab
+# stages its inert development placeholder instead, so the lab still comes up and is solvable.
+#   CTF_FLAG_DODO  objective `dodo`  (SECRET: Wonderland's dodo release token)
+inputs:
+  CTF_FLAG_DODO:
+    description: the dodo flag, injected into the Jenkins credential store as a Global-scope credential
+
+machines:
+  # Wonderland's git host: Gitea, holding the private Wonderland/dodo repository (Terraform IaC). The
+  # setup job provisions the org, the attacker user (alice, write) and the Jenkins poller (jenkins,
+  # read), then pushes the sample project with its `main.tf`. No `publish` number: `publish: true`
+  # asks the runner for a free host port it picks at `up` time (dynamic), so two labs never collide.
+  gitea:
+    app:
+      build: build/gitea
+    networks: { lab: 12 }
+    resources: { cpus: 1, memory_mb: 1024 }
+    volumes: { data: /data }
+    ports:
+      web: { port: 3000, protocol: http, publish: true }
+    setup: [build/gitea/seed.sh]
+
+  # Wonderland's Jenkins controller: a FIXED pipeline (defined in Jenkins, not read from the repo)
+  # for the dodo repository, polled over git every minute. The pipeline runs Checkov as a deploy
+  # gate and, past the gate, deploys and — only when a public bucket was actually deployed — binds
+  # the Global-scope `flag` credential (the upstream mis-configuration) and prints it. The per-player
+  # flag arrives as a root-only file; only the entrypoint reads it.
+  jenkins:
+    app:
+      build: build/jenkins
+    networks: { lab: 10 }
+    resources: { cpus: 2, memory_mb: 2048 }
+    ports:
+      web: { port: 8080, protocol: http, publish: true }
+    files:
+      - { path: /run/lab/secrets/flag, input: CTF_FLAG_DODO }
+
+# From the player's side, on every target: reachability checks that both services answer, and the
+# intended path as a solver that runs inside the Jenkins controller — it performs the scan-gate
+# bypass end to end (clone with the attacker's write creds, make the dodo bucket public, drop a
+# `.checkov.yaml` that neuters the scan, push to main, trigger the pipeline, read the build console)
+# and proves the Global-scope flag was exfiltrated past the gate, without ever printing it. Jenkins
+# is slow to boot and the pipeline needs a scan + a deploy, so the waits are generous.
+checks:
+  - name: the Gitea git host answers
+    http: http://gitea:3000/
+    wait: 3m
+  - name: the Jenkins controller answers
+    http: http://jenkins:8080/login
+    wait: 5m
+  - name: the deploy gate is bypassed and the flag credential is exfiltrated
+    from: jenkins
+    exec: bash /usr/local/bin/dodo-solve
+    wait: 7m
+
+# Shown when the lab is up.
+message: |
+  Wonderland ships infrastructure with CI. A **Jenkins** controller builds the **Wonderland/dodo**
+  repository (Terraform for an S3 bucket) hosted on **Gitea**, and runs a security scanner
+  (**Checkov**) as a **deploy gate**: it refuses to deploy a bucket that is publicly readable. You
+  have an account with **write** access to the repo.
+
+  - Gitea:   {{ machines.gitea.ports.web.url }}   (sign in as `alice` / `alice`)
+  - Jenkins: {{ machines.jenkins.ports.web.url }} (sign in as `admin` / `admin` to read build consoles)
+
+  Wonderland's release token is stored as a Jenkins credential at **Global** scope; the deploy step
+  prints it, but only once a *public* bucket actually reaches deployment. Make the `dodo` bucket
+  public — and get it past the scanner.
+
+  ```
+  git clone {{ machines.gitea.ports.web.url }}Wonderland/dodo.git
+  ```
+
+  The scanner reads its configuration from the repository. Set the bucket's `acl` to `public-read`
+  in `main.tf`, then neuter the scan from inside the repo (a `.checkov.yaml` with `soft-fail: true`
+  and a check that does not exist), and push to `main`. The pipeline polls every minute. When the
+  deploy prints the token it will not mask it in plaintext — it transforms it first (reverse, then
+  base64: recover it with `base64 -d | rev`); read the build's console output in Jenkins.

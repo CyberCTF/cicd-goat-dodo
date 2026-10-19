@@ -1,0 +1,19 @@
+{
+  "objectives": [
+    {
+      "key": "dodo",
+      "title": "Dodo",
+      "prompt": "\"The best way to explain it is to do it.\" Wonderland deploys infrastructure with CI: a Jenkins pipeline scans and deploys the Wonderland/dodo repository (Terraform for an S3 bucket, hosted on Gitea), running Checkov as a deploy gate that refuses a publicly-readable bucket. Wonderland's release token lives in the Jenkins credential store at Global scope, and the deploy step prints it — but only once a public bucket actually reaches deployment. You have write access to the repository. Make the dodo bucket public (acl = \"public-read\"), get it past the scanner by overriding the scan's configuration from inside the repo (a .checkov.yaml with soft-fail and a check that does not exist), and push to main. When the pipeline runs, read the build's console output, recover the exfiltrated value, and submit the flag.",
+      "check": { "evidence": "SECRET", "format": "%s" },
+      "dev": "dodo-dev-flag-not-a-real-secret-0000",
+      "capabilities": [
+        "flow-control-scan-gate-bypass"
+      ],
+      "hints": [
+        "The pipeline is defined in Jenkins, not in a Jenkinsfile you can edit — so you cannot just change what it runs. What you CAN change is the repository it scans and deploys. The only control between your change and the deploy is the security scan.",
+        "Checkov auto-loads a .checkov.yaml from the repository it scans. Add one with `soft-fail: true` (never fail the build) and `check:` restricted to a check that does not exist (e.g. MY_CHECK, so nothing is actually evaluated). That neuters the gate for your public bucket.",
+        "The deploy step binds a Global-scope credential and prints it, but Jenkins masks the raw value and its plain base64. It is reversed before being base64-encoded, so the masker misses it: recover the flag from the console blob with `base64 -d | rev`. Push to main; the pipeline polls about once a minute."
+      ]
+    }
+  ]
+}
